@@ -1,0 +1,103 @@
+name: Build OpenWrt
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH connection to Actions'
+        required: false
+        default: 'false'
+
+env:
+  REPO_URL: https://github.com/openwrt/openwrt.git
+  REPO_BRANCH: main
+  CONFIG_FILE: .config
+  DIY_SCRIPT: diy.sh
+  UPLOAD_BIN_DIR: false
+  FIRMWARE_RELEASE: true
+  FIRMWARE_TAG: OpenWrt
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: Initialize environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-2204)
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Load custom configuration
+      run: |
+        [ -e files ] && mv files openwrt/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_SCRIPT
+        cd openwrt
+        ../$DIY_SCRIPT
+
+    - name: SSH connection to Actions
+      uses: mxschmitt/action-tmate@v3
+      if: ${{ github.event.inputs.ssh == 'true' && github.event_name == 'workflow_dispatch' }}
+
+    - name: Compile firmware
+      id: compile
+      working-directory: openwrt
+      run: |
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        make defconfig
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "date=$(date +"%Y%m%d%H%M%S")" >> $GITHUB_OUTPUT
+        echo "profile=$(cat .config | grep CONFIG_TARGET_PROFILE | cut -d'=' -f2)" >> $GITHUB_OUTPUT
+
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT
+
+    - name: Upload bin directory
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      with:
+        name: OpenWrt_bin_${{ env.FIRMWARE_TAG }}_${{ steps.compile.outputs.date }}
+        path: openwrt/bin
+
+    - name: Organize files
+      id: organize
+      if: env.FIRMWARE_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+      working-directory: openwrt/bin/targets/*/*
+      run: |
+        rm -rf packages
+        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@master
+      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
+      with:
+        files: ${{ env.FIRMWARE_PATH }}/*
+        name: ${{ env.FIRMWARE_TAG }} ${{ steps.compile.outputs.date }}
+        tag_name: ${{ env.FIRMWARE_TAG }}_${{ steps.compile.outputs.date }}
+        body: |
+          This is OpenWrt Firmware for ${{ steps.compile.outputs.profile }}
+          ### 📒 固件信息
+          - 💻 平台：${{ steps.compile.outputs.profile }}
+          - ⏰ 编译时间：${{ steps.compile.outputs.date }}
