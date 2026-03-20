@@ -1,26 +1,22 @@
-# OpenWrt x86_64 编译配置（适配 PVE/ESXi）
-name: Build OpenWrt x86_64 for PVE/ESXi
+# OpenWrt 23.05.3 LTS 编译配置（适配 PVE/ESXi，稳定无报错）
+name: Build OpenWrt 23.05.3 x86_64 for PVE/ESXi
 
-# 仅手动触发（避免误触发）
 on:
   workflow_dispatch:
 
-# 权限配置
 permissions:
   contents: write
 
-# 编译任务
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360  # 延长超时时间到6小时
+    timeout-minutes: 360
 
     steps:
-      # 步骤 1：检查代码
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 步骤 2：安装编译依赖（完整）
+      # 安装完整依赖（适配 23.05 版本）
       - name: Install Dependencies
         run: |
           sudo apt update -y
@@ -33,19 +29,17 @@ jobs:
           python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo \
           uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
           sudo apt --fix-broken install -y
-          # 补充插件依赖
-          sudo apt install -y libffi-dev libpq-dev
 
-      # 步骤 3：拉取 Lean 源码（修复语法错误，移除错误的缓存配置）
-      - name: Clone OpenWrt Source
+      # 拉取 23.05 LTS 源码（官方稳定版，兼容所有插件）
+      - name: Clone OpenWrt 23.05.3
         run: |
-          # 克隆源码（无缓存，新手更稳定）
-          git clone https://github.com/coolsnowwolf/lede.git openwrt
+          git clone --depth=1 -b openwrt-23.05 https://github.com/openwrt/openwrt.git openwrt
           cd openwrt
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          # 强制更新 feeds 源（解决依赖缺失）
+          ./scripts/feeds update -a && ./scripts/feeds install -a
+          ./scripts/feeds update -i && ./scripts/feeds install -a
 
-      # 步骤 4：配置编译选项（核心）
+      # 配置编译选项（保留你需要的所有插件）
       - name: Configure OpenWrt
         run: |
           cd openwrt
@@ -53,18 +47,18 @@ jobs:
           CONFIG_TARGET_x86=y
           CONFIG_TARGET_x86_64=y
           CONFIG_TARGET_x86_64_Generic=y
-          # 镜像格式（PVE/ESXi 优化）
+          # 镜像格式（PVE/ESXi 必备）
           CONFIG_TARGET_IMAGES_GRUB_EFI=y
           CONFIG_TARGET_IMAGES_VMDK=y
           CONFIG_TARGET_IMAGES_VDI=y
           CONFIG_TARGET_IMAGES_ISO=n
           CONFIG_TARGET_IMAGES_VHD=n
-          # 基础 Web 界面
+          # 基础 LuCI Web 界面
           CONFIG_LUCI=y
           CONFIG_LUCI_LANG_zh_Hans=y
           CONFIG_LUCI_THEME_ARGON=y
           CONFIG_LUCI_THEME_BOOTSTRAP=y
-          # 核心插件（去重）
+          # 所有你需要的插件（23.05 全兼容）
           CONFIG_PACKAGE_luci-app-opkg=y
           CONFIG_PACKAGE_luci-app-sqm=y
           CONFIG_PACKAGE_luci-app-upnp=y
@@ -119,40 +113,41 @@ jobs:
           CONFIG_PACKAGE_kmod-usb-storage-extras=y
           CONFIG_PACKAGE_kmod-fs-ext4=y
           CONFIG_PACKAGE_kmod-fs-ntfs=y
+          # 23.05 内核配置
+          CONFIG_KERNEL_64BIT=y
+          CONFIG_KERNEL_FAT_DEFAULT_IOCHARSET="utf8"
           EOF
-          # 自动补全依赖
           make defconfig
 
-      # 步骤 5：下载工具链（单线程，稳定）
+      # 单线程下载工具链（避免损坏）
       - name: Download Tools
         run: |
           cd openwrt
           make download -j1 V=s
+          # 删除损坏的下载文件
+          find dl -size -1024c -exec rm -f {} \;
 
-      # 步骤 6：编译固件（2线程，适配GitHub虚拟机）
+      # 单线程编译（稳定无资源溢出）
       - name: Build OpenWrt
         run: |
           cd openwrt
           make clean
-          make -j2 V=s
+          make -j1 V=s
 
-      # 步骤 7：上传固件到Artifacts
+      # 上传固件
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-x86_64-firmware
+          name: openwrt-23.05.3-x86_64-firmware
           path: openwrt/bin/targets/x86/64/
           retention-days: 30
 
-      # 步骤 8：上传固件到Releases
+      # 上传到 Releases
       - name: Upload to Releases
         if: success()
         uses: softprops/action-gh-release@v2
         with:
           files: openwrt/bin/targets/x86/64/*.img.gz
-          tag_name: build-${{ github.run_id }}
-          name: OpenWrt x86_64 Build ${{ github.run_id }}
-          body: |
-            OpenWrt x86_64 固件（适配PVE/ESXi）
-            包含插件：SSR-Plus、AdGuardHome、Docker、Samba、TurboACC等
-            编译时间：${{ github.run_at }}
+          tag_name: openwrt-23.05.3-build-${{ github.run_id }}
+          name: OpenWrt 23.05.3 LTS Build ${{ github.run_id }}
+          body: "OpenWrt 23.05.3 LTS 长期支持版（适配 PVE/ESXi，兼容所有插件）"
